@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Monitor EC2 /var/log/messages for keyword and send email via SES
+
+Parameters:
+  InstanceId:
+    Type: String
+    Description: EC2 Instance ID to monitor
+    Default: i-0aef57fa2775fc63c
+
+  Keyword:
+    Type: String
+    Description: Keyword to detect in logs
+    Default: sjin6-test
+
+  ToEmail:
+    Type: String
+    Description: Notification destination email (must be verified in SES)
+    Default: SHUOJI.JIN@DXC.COM
+
+  FromEmail:
+    Type: String
+    Description: Sender email (must be verified in SES)
+    Default: SHUOJI.JIN@DXC.COM
+
+Resources:
+  # CloudWatch Log Group for EC2 /var/log/messages
+  EC2LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ec2/${InstanceId}/messages'
+      RetentionInDays: 30
+
+  # Metric Filter: counts lines containing the keyword
+  KeywordMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref EC2LogGroup
+      FilterPattern: !Sub '"${Keyword}"'
+      MetricTransformations:
+        - MetricName: !Sub '${Keyword}-count'
+          MetricNamespace: EC2LogMonitor
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # CloudWatch Alarm: triggers when keyword appears
+  KeywordAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Keyword}-detected'
+      AlarmDescription: !Sub 'Keyword ${Keyword} detected in /var/log/messages'
+      MetricName: !Sub '${Keyword}-count'
+      Namespace: EC2LogMonitor
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertSNSTopic
+
+  # SNS Topic to trigger Lambda
+  AlertSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Keyword}-alert-topic'
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt LogMonitorLambda.Arn
+
+  # Lambda permission to be invoked by SNS
+  LambdaSNSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LogMonitorLambda
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AlertSNSTopic
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LogMonitorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt EC2LogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: '*'
+
+  # Lambda Function
+  LogMonitorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Keyword}-log-monitor'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !Ref EC2LogGroup
+          KEYWORD: !Ref Keyword
+          TO_EMAIL: !Ref ToEmail
+          FROM_EMAIL: !Ref FromEmail
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          logs_client = boto3.client('logs')
+          ses_client = boto3.client('ses', region_name='ap-northeast-1')
+
+          LOG_GROUP = os.environ['LOG_GROUP_NAME']
+          KEYWORD = os.environ['KEYWORD']
+          TO_EMAIL = os.environ['TO_EMAIL']
+          FROM_EMAIL = os.environ['FROM_EMAIL']
+
+
+          def lambda_handler(event, context):
+              for record in event.get('Records', []):
+                  message = record.get('Sns', {}).get('Message', '{}')
+                  alarm = json.loads(message)
+
+                  trigger_time = alarm.get('StateChangeTime', '')
+                  alarm_name = alarm.get('AlarmName', '')
+
+                  try:
+                      dt = datetime.strptime(trigger_time[:19], '%Y-%m-%dT%H:%M:%S')
+                      dt = dt.replace(tzinfo=timezone.utc)
+                      end_ms = int(dt.timestamp() * 1000)
+                      start_ms = end_ms - (5 * 60 * 1000)
+                  except Exception:
+                      end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                      start_ms = end_ms - (5 * 60 * 1000)
+
+                  matching_lines = search_logs(start_ms, end_ms)
+                  if matching_lines:
+                      send_email(alarm_name, trigger_time, matching_lines)
+
+              return {'statusCode': 200}
+
+
+          def search_logs(start_ms, end_ms):
+              matching = []
+              try:
+                  paginator = logs_client.get_paginator('filter_log_events')
+                  pages = paginator.paginate(
+                      logGroupName=LOG_GROUP,
+                      startTime=start_ms,
+                      endTime=end_ms,
+                      filterPattern=f'"{KEYWORD}"'
+                  )
+                  for page in pages:
+                      for event in page.get('events', []):
+                          ts = datetime.fromtimestamp(
+                              event['timestamp'] / 1000, tz=timezone.utc
+                          ).strftime('%Y-%m-%d %H:%M:%S UTC')
+                          matching.append(f"[{ts}] {event['message'].strip()}")
+              except Exception as e:
+                  matching.append(f"(ログ取得エラー: {str(e)})")
+              return matching
+
+
+          def send_email(alarm_name, trigger_time, lines):
+              lines_text = '\n'.join(lines)
+              body = f"""キーワード検知通知
+
+          アラーム名: {alarm_name}
+          検知時刻: {trigger_time}
+          キーワード: {KEYWORD}
+          ロググループ: {LOG_GROUP}
+
+          --- 該当ログ行 ---
+          {lines_text}
+          ------------------
+
+          ※ このメールは自動送信です。
+          """
+              ses_client.send_email(
+                  Source=FROM_EMAIL,
+                  Destination={'ToAddresses': [TO_EMAIL]},
+                  Message={
+                      'Subject': {
+                          'Data': f'[AWS Alert] キーワード "{KEYWORD}" を検知しました',
+                          'Charset': 'UTF-8'
+                      },
+                      'Body': {
+                          'Text': {
+                              'Data': body,
+                              'Charset': 'UTF-8'
+                          }
+                      }
+                  }
+              )
+
+  # IAM Role for CloudWatch Agent on EC2
+  CloudWatchAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  CloudWatchAgentInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CloudWatchAgentRole
+
+Outputs:
+  LambdaFunction:
+    Description: Lambda function name
+    Value: !Ref LogMonitorLambda
+
+  LogGroupName:
+    Description: CloudWatch Log Group name (configure CloudWatch Agent to send logs here)
+    Value: !Ref EC2LogGroup
+
+  NextStep:
+    Description: Next step after deployment
+    Value: !Sub 'Install CloudWatch Agent on EC2 and configure it to send /var/log/messages to log group /ec2/${InstanceId}/messages. Also verify email ${ToEmail} in SES.'
