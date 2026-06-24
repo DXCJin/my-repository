@@ -1,74 +1,28 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Simple web server environment with VPC, public subnet, and EC2 instance (Amazon Linux 2023)
+Description: Web server using existing VPC/subnets. SSM Session Manager access via internet (no VPC endpoints needed).
 
 Parameters:
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: EC2 Key Pair for SSH access
+    Description: EC2 Key Pair (kept for emergency use)
     Default: jinshuoji@keypair
 
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC ID
+    Default: vpc-097b82126e0f90dab
+
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet (must have route to Internet Gateway so SSM agent can reach AWS endpoints)
+    Default: subnet-0e3acaf5108088fc1
+
 Resources:
-  VPC:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: 10.0.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-      Tags:
-        - Key: Name
-          Value: WebServerVPC
-
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: WebServerIGW
-
-  InternetGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId: !Ref VPC
-      InternetGatewayId: !Ref InternetGateway
-
-  PublicSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: 10.0.1.0/24
-      MapPublicIpOnLaunch: true
-      AvailabilityZone: !Select [0, !GetAZs '']
-      Tags:
-        - Key: Name
-          Value: WebServerPublicSubnet
-
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: WebServerPublicRT
-
-  PublicRoute:
-    Type: AWS::EC2::Route
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  PublicSubnetRouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet
-      RouteTableId: !Ref PublicRouteTable
-
   WebServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP access (SSH via SSM, no port 22 needed)
-      VpcId: !Ref VPC
+      GroupDescription: Allow HTTP inbound; SSM outbound handled by default egress rule
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -78,7 +32,7 @@ Resources:
         - Key: Name
           Value: WebServerSG
 
-  # IAM Role granting EC2 permission to use SSM Session Manager
+  # IAM Role allowing EC2 to register with SSM (no VPC endpoint required when instance has public IP)
   SSMInstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -106,17 +60,22 @@ Resources:
       InstanceType: t2.micro
       ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
       KeyName: !Ref KeyPairName
-      SubnetId: !Ref PublicSubnet
-      SecurityGroupIds:
-        - !Ref WebServerSecurityGroup
+      SubnetId: !Ref PublicSubnetId
+      # Public IP is required for SSM to work without VPC endpoints
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnetId
+          GroupSet:
+            - !Ref WebServerSecurityGroup
       IamInstanceProfile: !Ref SSMInstanceProfile
       UserData:
         Fn::Base64: |
           #!/bin/bash
           dnf update -y
           dnf install -y httpd
-          systemctl start httpd
           systemctl enable httpd
+          systemctl start httpd
           systemctl enable amazon-ssm-agent
           systemctl start amazon-ssm-agent
           cat > /var/www/html/index.html << 'EOF'
@@ -134,18 +93,14 @@ Resources:
           Value: WebServerEC2
 
 Outputs:
+  InstanceId:
+    Description: Instance ID — use this to start SSM Session Manager in the console
+    Value: !Ref WebServerInstance
+
   PublicIP:
     Description: Public IP address of the EC2 instance
     Value: !GetAtt WebServerInstance.PublicIp
 
-  PublicDNS:
-    Description: Public DNS name of the EC2 instance
-    Value: !GetAtt WebServerInstance.PublicDnsName
-
   WebURL:
-    Description: URL to access the web server
+    Description: Hello World page URL
     Value: !Sub 'http://${WebServerInstance.PublicIp}'
-
-  InstanceId:
-    Description: Instance ID for SSM Session Manager connection
-    Value: !Ref WebServerInstance
