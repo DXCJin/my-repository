@@ -60,8 +60,6 @@ Resources:
       InstanceType: t2.micro
       ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
       KeyName: !Ref KeyPairName
-      SubnetId: !Ref PublicSubnetId
-      # Public IP is required for SSM to work without VPC endpoints
       NetworkInterfaces:
         - AssociatePublicIpAddress: true
           DeviceIndex: 0
