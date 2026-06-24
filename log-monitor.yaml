@@ -23,18 +23,11 @@ Parameters:
     Default: SHUOJI.JIN@DXC.COM
 
 Resources:
-  # CloudWatch Log Group for EC2 /var/log/messages
-  EC2LogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub '/ec2/${InstanceId}/messages'
-      RetentionInDays: 30
-
   # Metric Filter: triggers when ANY of the keywords appears
   KeywordMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
-      LogGroupName: !Ref EC2LogGroup
+      LogGroupName: !Sub '/ec2/${InstanceId}/messages'
       FilterPattern: '?sjin6-test-01 ?sjin6-test-02'
       MetricTransformations:
         - MetricName: keyword-detected-count
@@ -101,7 +94,7 @@ Resources:
                   - logs:GetLogEvents
                   - logs:DescribeLogGroups
                   - logs:DescribeLogStreams
-                Resource: !GetAtt EC2LogGroup.Arn
+                Resource: !Sub 'arn:aws:logs:ap-northeast-1:210275524027:log-group:/ec2/${InstanceId}/messages:*'
               - Effect: Allow
                 Action:
                   - ses:SendEmail
@@ -118,7 +111,7 @@ Resources:
       Timeout: 30
       Environment:
         Variables:
-          LOG_GROUP_NAME: !Ref EC2LogGroup
+          LOG_GROUP_NAME: !Sub '/ec2/${InstanceId}/messages'
           KEYWORDS: !Ref Keywords
           TO_EMAIL: !Ref ToEmail
           FROM_EMAIL: !Ref FromEmail
@@ -253,7 +246,7 @@ Outputs:
 
   LogGroupName:
     Description: CloudWatch Log Group (configure CloudWatch Agent to send logs here)
-    Value: !Ref EC2LogGroup
+    Value: !Sub '/ec2/${InstanceId}/messages'
 
   NextStep:
     Description: Next steps after deployment
