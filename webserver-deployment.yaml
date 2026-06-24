@@ -1,11 +1,7 @@
 template-file-path: webserver.yaml
 parameters:
-  - parameter-key: KeyPairName
-    parameter-value: jinshuoji@keypair
-  - parameter-key: VpcId
-    parameter-value: vpc-097b82126e0f90dab
-  - parameter-key: PublicSubnetId
-    parameter-value: subnet-0e3acaf5108088fc1
+  KeyPairName: jinshuoji@keypair
+  VpcId: vpc-097b82126e0f90dab
+  PublicSubnetId: subnet-0e3acaf5108088fc1
 tags:
-  - tag-key: Environment
-    tag-value: dev
+  Environment: dev
