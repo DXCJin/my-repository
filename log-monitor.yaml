@@ -15,12 +15,12 @@ Parameters:
   ToEmail:
     Type: String
     Description: Notification destination email (must be verified in SES)
-    Default: SHUOJI.JIN@DXC.COM
+    Default: shuoji.jin@dxc.com
 
   FromEmail:
     Type: String
     Description: Sender email (must be verified in SES)
-    Default: SHUOJI.JIN@DXC.COM
+    Default: shuoji.jin@dxc.com
 
 Resources:
   # Metric Filter: triggers when ANY of the keywords appears

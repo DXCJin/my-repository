@@ -2,7 +2,7 @@ template-file-path: log-monitor.yaml
 parameters:
   InstanceId: i-0aef57fa2775fc63c
   Keywords: sjin6-test-01,sjin6-test-02
-  ToEmail: SHUOJI.JIN@DXC.COM
-  FromEmail: SHUOJI.JIN@DXC.COM
+  ToEmail: shuoji.jin@dxc.com
+  FromEmail: shuoji.jin@dxc.com
 tags:
   Environment: dev
