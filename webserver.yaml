@@ -5,6 +5,7 @@ Parameters:
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: EC2 Key Pair for SSH access
+    Default: jinshuoji@keypair
 
 Resources:
   VPC:
@@ -66,20 +67,38 @@ Resources:
   WebServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP and SSH access
+      GroupDescription: Allow HTTP access (SSH via SSM, no port 22 needed)
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
           Value: WebServerSG
+
+  # IAM Role granting EC2 permission to use SSM Session Manager
+  SSMInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: WebServerSSMRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: WebServerSSMProfile
+      Roles:
+        - !Ref SSMInstanceRole
 
   WebServerInstance:
     Type: AWS::EC2::Instance
@@ -90,6 +109,7 @@ Resources:
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
+      IamInstanceProfile: !Ref SSMInstanceProfile
       UserData:
         Fn::Base64: |
           #!/bin/bash
@@ -97,7 +117,18 @@ Resources:
           dnf install -y httpd
           systemctl start httpd
           systemctl enable httpd
-          echo "<h1>Hello from $(hostname -f)</h1>" > /var/www/html/index.html
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+          cat > /var/www/html/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="UTF-8"><title>Hello World</title></head>
+          <body style="font-family:Arial;text-align:center;margin-top:100px;">
+            <h1>Hello World!</h1>
+            <p>Deployed via AWS CloudFormation</p>
+          </body>
+          </html>
+          EOF
       Tags:
         - Key: Name
           Value: WebServerEC2
@@ -114,3 +145,7 @@ Outputs:
   WebURL:
     Description: URL to access the web server
     Value: !Sub 'http://${WebServerInstance.PublicIp}'
+
+  InstanceId:
+    Description: Instance ID for SSM Session Manager connection
+    Value: !Ref WebServerInstance
