@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Monitor EC2 /var/log/messages for keyword and send email via SES
+Description: Monitor EC2 /var/log/messages for multiple keywords and send email via SES
 
 Parameters:
   InstanceId:
@@ -7,10 +7,10 @@ Parameters:
     Description: EC2 Instance ID to monitor
     Default: i-0aef57fa2775fc63c
 
-  Keyword:
+  Keywords:
     Type: String
-    Description: Keyword to detect in logs
-    Default: sjin6-test
+    Description: Comma-separated keywords to detect (e.g. sjin6-test-01,sjin6-test-02)
+    Default: sjin6-test-01,sjin6-test-02
 
   ToEmail:
     Type: String
@@ -30,25 +30,25 @@ Resources:
       LogGroupName: !Sub '/ec2/${InstanceId}/messages'
       RetentionInDays: 30
 
-  # Metric Filter: counts lines containing the keyword
+  # Metric Filter: triggers when ANY of the keywords appears
   KeywordMetricFilter:
     Type: AWS::Logs::MetricFilter
     Properties:
       LogGroupName: !Ref EC2LogGroup
-      FilterPattern: !Sub '"${Keyword}"'
+      FilterPattern: '?sjin6-test-01 ?sjin6-test-02'
       MetricTransformations:
-        - MetricName: !Sub '${Keyword}-count'
+        - MetricName: keyword-detected-count
           MetricNamespace: EC2LogMonitor
           MetricValue: '1'
           DefaultValue: 0
 
-  # CloudWatch Alarm: triggers when keyword appears
+  # CloudWatch Alarm: triggers when any keyword appears
   KeywordAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub '${Keyword}-detected'
-      AlarmDescription: !Sub 'Keyword ${Keyword} detected in /var/log/messages'
-      MetricName: !Sub '${Keyword}-count'
+      AlarmName: ec2-keyword-detected
+      AlarmDescription: !Sub 'Keywords detected in /var/log/messages: ${Keywords}'
+      MetricName: keyword-detected-count
       Namespace: EC2LogMonitor
       Statistic: Sum
       Period: 60
@@ -63,7 +63,7 @@ Resources:
   AlertSNSTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: !Sub '${Keyword}-alert-topic'
+      TopicName: ec2-keyword-alert-topic
       Subscription:
         - Protocol: lambda
           Endpoint: !GetAtt LogMonitorLambda.Arn
@@ -111,7 +111,7 @@ Resources:
   LogMonitorLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${Keyword}-log-monitor'
+      FunctionName: ec2-keyword-log-monitor
       Runtime: python3.12
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
@@ -119,7 +119,7 @@ Resources:
       Environment:
         Variables:
           LOG_GROUP_NAME: !Ref EC2LogGroup
-          KEYWORD: !Ref Keyword
+          KEYWORDS: !Ref Keywords
           TO_EMAIL: !Ref ToEmail
           FROM_EMAIL: !Ref FromEmail
       Code:
@@ -133,7 +133,7 @@ Resources:
           ses_client = boto3.client('ses', region_name='ap-northeast-1')
 
           LOG_GROUP = os.environ['LOG_GROUP_NAME']
-          KEYWORD = os.environ['KEYWORD']
+          KEYWORDS = [k.strip() for k in os.environ['KEYWORDS'].split(',')]
           TO_EMAIL = os.environ['TO_EMAIL']
           FROM_EMAIL = os.environ['FROM_EMAIL']
 
@@ -155,14 +155,19 @@ Resources:
                       end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                       start_ms = end_ms - (5 * 60 * 1000)
 
-                  matching_lines = search_logs(start_ms, end_ms)
-                  if matching_lines:
-                      send_email(alarm_name, trigger_time, matching_lines)
+                  all_matches = {}
+                  for keyword in KEYWORDS:
+                      lines = search_logs(start_ms, end_ms, keyword)
+                      if lines:
+                          all_matches[keyword] = lines
+
+                  if all_matches:
+                      send_email(alarm_name, trigger_time, all_matches)
 
               return {'statusCode': 200}
 
 
-          def search_logs(start_ms, end_ms):
+          def search_logs(start_ms, end_ms, keyword):
               matching = []
               try:
                   paginator = logs_client.get_paginator('filter_log_events')
@@ -170,7 +175,7 @@ Resources:
                       logGroupName=LOG_GROUP,
                       startTime=start_ms,
                       endTime=end_ms,
-                      filterPattern=f'"{KEYWORD}"'
+                      filterPattern=f'"{keyword}"'
                   )
                   for page in pages:
                       for event in page.get('events', []):
@@ -183,18 +188,23 @@ Resources:
               return matching
 
 
-          def send_email(alarm_name, trigger_time, lines):
-              lines_text = '\n'.join(lines)
+          def send_email(alarm_name, trigger_time, all_matches):
+              sections = []
+              for keyword, lines in all_matches.items():
+                  section = f"【{keyword}】\n" + '\n'.join(lines)
+                  sections.append(section)
+
+              detected = ', '.join(all_matches.keys())
               body = f"""キーワード検知通知
 
           アラーム名: {alarm_name}
           検知時刻: {trigger_time}
-          キーワード: {KEYWORD}
+          検知キーワード: {detected}
           ロググループ: {LOG_GROUP}
 
-          --- 該当ログ行 ---
-          {lines_text}
-          ------------------
+          {'=' * 40}
+          {chr(10).join(sections)}
+          {'=' * 40}
 
           ※ このメールは自動送信です。
           """
@@ -203,7 +213,7 @@ Resources:
                   Destination={'ToAddresses': [TO_EMAIL]},
                   Message={
                       'Subject': {
-                          'Data': f'[AWS Alert] キーワード "{KEYWORD}" を検知しました',
+                          'Data': f'[AWS Alert] キーワード検知: {detected}',
                           'Charset': 'UTF-8'
                       },
                       'Body': {
@@ -242,9 +252,9 @@ Outputs:
     Value: !Ref LogMonitorLambda
 
   LogGroupName:
-    Description: CloudWatch Log Group name (configure CloudWatch Agent to send logs here)
+    Description: CloudWatch Log Group (configure CloudWatch Agent to send logs here)
     Value: !Ref EC2LogGroup
 
   NextStep:
-    Description: Next step after deployment
-    Value: !Sub 'Install CloudWatch Agent on EC2 and configure it to send /var/log/messages to log group /ec2/${InstanceId}/messages. Also verify email ${ToEmail} in SES.'
+    Description: Next steps after deployment
+    Value: !Sub '1. Verify email ${ToEmail} in SES. 2. Install CloudWatch Agent on EC2 and send /var/log/messages to /ec2/${InstanceId}/messages'
