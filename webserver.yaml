@@ -66,15 +66,16 @@ Resources:
             - !Ref WebServerSecurityGroup
       IamInstanceProfile: !Ref SSMInstanceProfile
       UserData:
-        Fn::Base64: |
+        Fn::Base64: !Sub |
           #!/bin/bash
+          set -e
           dnf update -y
           dnf install -y httpd
           systemctl enable httpd
           systemctl start httpd
           systemctl enable amazon-ssm-agent
           systemctl start amazon-ssm-agent
-          cat > /var/www/html/index.html << 'EOF'
+          cat > /var/www/html/index.html <<HTMLEOF
           <!DOCTYPE html>
           <html>
           <head><meta charset="UTF-8"><title>Hello World</title></head>
@@ -83,7 +84,7 @@ Resources:
             <p>Deployed via AWS CloudFormation</p>
           </body>
           </html>
-          EOF
+          HTMLEOF
       Tags:
         - Key: Name
           Value: WebServerEC2
