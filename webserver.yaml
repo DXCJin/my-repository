@@ -36,7 +36,6 @@ Resources:
   SSMInstanceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: WebServerSSMRole
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -50,7 +49,6 @@ Resources:
   SSMInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      InstanceProfileName: WebServerSSMProfile
       Roles:
         - !Ref SSMInstanceRole
 
